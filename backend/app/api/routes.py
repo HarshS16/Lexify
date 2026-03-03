@@ -19,6 +19,7 @@ from app.models.schemas import (
     WordOfTheDayResponse,
 )
 from app.services.ai_service import get_ai_service
+from app.core.content_filter import is_safe, BLOCKED_RESPONSE
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,6 +33,9 @@ async def search_words(
     db: AsyncSession = Depends(get_db),
 ):
     """Main endpoint: find better words for user input."""
+    if not is_safe(request.input_text):
+        raise HTTPException(status_code=400, detail=BLOCKED_RESPONSE)
+
     ai = get_ai_service()
 
     # Run AI pipeline (single call)
@@ -77,6 +81,9 @@ async def search_words(
 @router.post("/rewrite", response_model=RewriteResult)
 async def rewrite_sentence(request: RewriteRequest):
     """Rewrite a sentence with a specific goal."""
+    if not is_safe(request.input_text):
+        raise HTTPException(status_code=400, detail=BLOCKED_RESPONSE)
+
     ai = get_ai_service()
     return await ai.rewrite_sentence(
         input_text=request.input_text,

@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 import httpx
 from app.core.config import get_settings
 from app.core.database import init_db
+from app.core.rate_limiter import RateLimiter
 from app.api.routes import router
 
 settings = get_settings()
@@ -84,6 +85,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Rate limiter — 10 req/min, 200 req/day per IP on AI endpoints
+app.add_middleware(RateLimiter, requests_per_minute=10, requests_per_day=200)
 
 # ── Error Handlers (always include CORS headers) ──
 

@@ -19,17 +19,17 @@ from datetime import date
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── Verified working free models on OpenRouter ──
+# Ordered by typical response speed (fastest first)
 RACE_MODELS = [
-    "arcee-ai/trinity-large-preview:free",
-    "arcee-ai/trinity-mini:free",
-    "google/gemma-3-12b-it:free",
     "google/gemma-3-4b-it:free",
     "google/gemma-3n-e4b-it:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "arcee-ai/trinity-mini:free",
     "nvidia/nemotron-nano-9b-v2:free",
     "stepfun/step-3.5-flash:free",
     "z-ai/glm-4.5-air:free",
+    "arcee-ai/trinity-large-preview:free",
+    "google/gemma-3-12b-it:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
 ]
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -70,8 +70,8 @@ class AIService:
             "HTTP-Referer": "https://lexify.harshjsx.dev",
             "X-Title": "Lexify",
         }
-        # Persistent HTTP client — reused across all requests
-        self._client = httpx.AsyncClient(timeout=45.0, headers=self.headers)
+        # Persistent HTTP client — 20s timeout (drop slow models fast)
+        self._client = httpx.AsyncClient(timeout=20.0, headers=self.headers)
         # Cache for repeated queries
         self._cache = TTLCache(ttl_seconds=3600)
 
@@ -139,7 +139,7 @@ class AIService:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 3000,
+                "max_tokens": 1200,
             },
         )
 
@@ -205,38 +205,29 @@ class AIService:
             logger.info("📦 Cache hit")
             return cached
 
-        prompt = f"""You are an expert linguist and word specialist.
+        prompt = f"""Expert linguist. Find better words for the input below.
 
-A user is searching for better, more precise words. Analyze their input and provide suggestions.
+Input: "{user_input}"
+Tone: {tone}
+Intent: {intent}
 
-**User Input:** "{user_input}"  
-**Desired Tone:** {tone}  
-**Intent:** {intent}
-
-Respond with a single JSON object containing ALL of the following:
-
+Return ONLY this JSON:
 {{
   "analysis": {{
-    "primary_emotion": "the main emotion detected",
-    "secondary_emotion": "secondary emotion or null",
-    "intensity": "low" | "medium" | "high",
-    "context_summary": "1-2 sentence summary of what the user is trying to express"
+    "primary_emotion": "main emotion",
+    "secondary_emotion": "secondary or null",
+    "intensity": "low|medium|high",
+    "context_summary": "1 sentence"
   }},
-  "best_fit": "the single best word",
-  "best_fit_explanation": "why this word is the best fit (1-2 sentences)",
-  "best_fit_categories": ["emotional", "professional", "creative", "formal", or "informal"],
+  "best_fit": "best word",
+  "best_fit_explanation": "why (1-2 sentences)",
+  "best_fit_categories": ["emotional"|"professional"|"creative"|"formal"|"informal"],
   "alternatives": [
-    {{
-      "word": "alternative word",
-      "strength": "low" | "medium" | "high",
-      "categories": ["category1", "category2"],
-      "explanation": "why this word fits (1 sentence)"
-    }}
+    {{"word": "word", "strength": "low|medium|high", "categories": [], "explanation": "1 sentence"}}
   ]
 }}
 
-Generate 5-8 alternatives. Avoid generic synonyms. Focus on emotionally precise, contextually accurate words.
-Return ONLY valid JSON, no other text."""
+5-8 alternatives. Emotionally precise, not generic synonyms. ONLY valid JSON."""
 
         raw = await self._generate(prompt)
         data = self._parse_json_response(raw)
@@ -289,24 +280,22 @@ Return ONLY valid JSON, no other text."""
         if cached:
             return cached
 
-        prompt = f"""You are an expert writing coach.
+        prompt = f"""Expert writing coach. Rewrite the sentence to match the goal. List every word change with a reason.
 
-Rewrite the sentence to match the user's goal. Highlight every word change with a reason.
+Sentence: "{input_text}"
+Goal: {goal}
+Tone: {tone}
 
-**Sentence:** "{input_text}"  
-**Goal:** {goal}  
-**Tone:** {tone}
-
-Respond with a single JSON object:
+Return ONLY this JSON:
 {{
-  "original": "the original sentence",
-  "rewritten": "the rewritten sentence",
+  "original": "original sentence",
+  "rewritten": "rewritten sentence",
   "changes": [
-    {{"original_word": "old", "new_word": "new", "reason": "why this change"}}
+    {{"original_word": "old", "new_word": "new", "reason": "why"}}
   ]
 }}
 
-Return ONLY valid JSON, no other text."""
+ONLY valid JSON."""
 
         raw = await self._generate(prompt)
         data = self._parse_json_response(raw)
@@ -325,22 +314,19 @@ Return ONLY valid JSON, no other text."""
         if cached:
             return cached
 
-        prompt = """You are an AI vocabulary curator.
+        prompt = """Vocabulary curator. Pick one interesting, nuanced, underused word.
 
-Generate one interesting, nuanced word that most people don't use enough.
-Pick words that are expressive, emotionally rich, or beautifully specific.
-
-Respond with a single JSON object:
+Return ONLY this JSON:
 {
   "word": "the word",
-  "meaning": "1-2 sentences, not dictionary-style",
-  "emotional_range": "what emotions this word can express",
-  "example_usage": "a natural sentence using the word",
+  "meaning": "1-2 sentences",
+  "emotional_range": "what emotions it expresses",
+  "example_usage": "natural sentence",
   "when_to_use": "1 sentence",
   "when_to_avoid": "1 sentence"
 }
 
-Return ONLY valid JSON, no other text."""
+ONLY valid JSON."""
 
         raw = await self._generate(prompt)
         data = self._parse_json_response(raw)

@@ -5,6 +5,7 @@ import HomePage from "./pages/HomePage";
 import WordOfTheDayPage from "./pages/WordOfTheDayPage";
 import VocabularyPage from "./pages/VocabularyPage";
 import HistoryPage from "./pages/HistoryPage";
+import { Analytics } from "@vercel/analytics/react";
 
 function App() {
   return (
@@ -18,6 +19,7 @@ function App() {
           <Route path="/history" element={<HistoryPage />} />
         </Routes>
         <Footer />
+        <Analytics />
       </div>
     </BrowserRouter>
   );

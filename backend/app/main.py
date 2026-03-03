@@ -37,6 +37,7 @@ origins = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
+    "https://lexify.harshjsx.dev",
     settings.FRONTEND_URL,
 ]
 # Remove empty strings and duplicates

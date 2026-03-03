@@ -1,4 +1,4 @@
-# Lexify-  Better Word For
+# Lexify — Better Word For
 
 AI-powered word suggestions that understand context, emotion, and tone — not just synonyms.
 
@@ -11,7 +11,7 @@ AI-powered word suggestions that understand context, emotion, and tone — not j
 
 ## Overview
 
-Standard thesauruses return a flat list of synonyms. Better Word For works differently — you describe what you're trying to say (a word, a phrase, a feeling), and the AI returns suggestions with definitions, usage examples, tone labels, and emotion tags. It's built around the idea that finding the right word is rarely about picking a synonym; it's about matching precision to intent.
+Standard thesauruses return a flat list of synonyms. Lexify works differently — you describe what you're trying to say (a word, a phrase, a feeling), and the AI returns suggestions with definitions, usage examples, tone labels, and emotion tags. It's built around the idea that finding the right word is rarely about picking a synonym; it's about matching precision to intent.
 
 The app supports two main modes: **word search** (find alternatives for any input) and **sentence rewrite** (paste text, specify a goal, get a rewritten version with change-by-change explanations).
 
@@ -19,45 +19,97 @@ The app supports two main modes: **word search** (find alternatives for any inpu
 
 ## How the AI Works
 
-Every search runs a three-step prompt chain, where each step's output feeds directly into the next:
+Every search sends a single, structured prompt that asks the model to return emotion analysis, word suggestions, and explanations in one JSON response. The prompt is compressed to ~100 tokens of instructions to minimize latency.
 
-**Step 1 — Emotion Analysis**
-The model reads the input and extracts the primary emotion, secondary emotion, intensity, and a short context summary.
-
-**Step 2 — Word Generation**
-Using the emotion analysis as context, the model generates a best-fit word and a set of ranked alternatives.
-
-**Step 3 — Explanation & Categorization**
-Each word gets an explanation of why it fits, plus categorical labels (register, tone, origin, rarity).
-
-The three-step chain produces meaningfully better results than a single prompt because each model call has a narrower, cleaner task.
+The response includes:
+- **Emotion analysis** — primary/secondary emotion, intensity, context summary
+- **Best-fit word** — the single best match with a reason
+- **5–8 ranked alternatives** — each with strength rating, categories, and an explanation
 
 ### Parallel Model Racing
 
-Requests are fired simultaneously to nine free models via OpenRouter. Whichever responds first wins; the rest are cancelled. This keeps latency low on free-tier models and provides automatic failover if one is rate-limited or down.
+Instead of calling one model and hoping it's fast, Lexify fires the same request to **9 models simultaneously** via OpenRouter. The first successful response wins; the rest are cancelled immediately.
 
 | Model | Provider |
 |---|---|
-| Trinity Large Preview | Arcee AI |
-| Trinity Mini | Arcee AI |
-| Gemma 3 12B | Google |
 | Gemma 3 4B | Google |
 | Gemma 3n E4B | Google |
-| Nemotron 3 Nano 30B | NVIDIA |
+| Trinity Mini | Arcee AI |
 | Nemotron Nano 9B v2 | NVIDIA |
 | Step 3.5 Flash | StepFun |
 | GLM 4.5 Air | Z-AI |
+| Trinity Large Preview | Arcee AI |
+| Gemma 3 12B | Google |
+| Nemotron 3 Nano 30B | NVIDIA |
+
+Models are ordered fastest-first. Timeout is 20 seconds — if a model hasn't responded by then, it's dropped from the race.
+
+---
+
+## Performance Optimizations
+
+| Optimization | What it does |
+|---|---|
+| **Single-call pipeline** | Emotion analysis + word generation + explanations in one LLM call instead of three sequential calls. Cuts latency by ~3x. |
+| **Parallel model racing** | 9 models called simultaneously. First response wins, rest are cancelled. |
+| **Persistent HTTP client** | One shared `httpx.AsyncClient` reused across all requests. Avoids TCP/TLS handshake overhead (~200-500ms saved per request). |
+| **In-memory TTL cache** | Identical queries within 1 hour return instantly from cache. LRU eviction at 200 entries. |
+| **Compressed prompts** | ~100 input tokens instead of ~180. Less tokenization time, faster model processing. |
+| **Reduced max_tokens** | Capped at 1,200 instead of 3,000. Models stop generating sooner since actual responses are ~500 tokens. |
+| **Keep-alive self-ping** | Background task pings `/health` every 13 minutes to prevent Render free-tier cold starts. |
+
+Typical response times:
+- Cache hit: **instant** (~0ms)
+- Warm server: **2–4 seconds**
+- Cold start (first request after deploy): **~10 seconds** (mitigated by self-ping + external cron)
+
+---
+
+## Safety & Abuse Protection
+
+### Content Filter
+
+All user input passes through a regex-based content filter before reaching the AI. Blocked inputs return a `400` with a clean error message and never consume AI credits.
+
+The filter covers:
+- **English profanity** — fuck, shit, bitch, asshole, and variants (using `\w*` to catch conjugations like "fucking", "shitty")
+- **Slurs & hate speech** — racial, ethnic, homophobic slurs
+- **Sexual / NSFW content** — pornography, explicit sexual terms
+- **Violent threats** — "kill yourself", bomb threats, school shooting references
+- **Hindi / Hinglish abuses** — romanized (chutiya, madarchod, bhosdi, gaand, randi, etc.) and Devanagari script (चूतिया, मादरचोद, भोसड़ीके, etc.)
+
+All patterns use word-boundary matching (`\b`) to minimize false positives — "classic" won't trigger on "ass", "assume" won't trigger on "ass".
+
+### Rate Limiting
+
+In-memory sliding window rate limiter applied to AI-heavy endpoints only:
+
+| Limit | Scope |
+|---|---|
+| **10 requests/minute** | Per IP address |
+| **200 requests/day** | Per IP address |
+
+Non-AI endpoints (health checks, saved words, static assets) are not rate-limited. The rate limiter reads `X-Forwarded-For` and `X-Real-IP` headers for accurate IP detection behind Render/Vercel proxies.
+
+### Error Handling
+
+- All error responses include CORS headers so the browser shows the actual error message instead of a generic CORS failure
+- Backend errors are caught by a global exception handler that returns "Something went wrong. Please try again." — raw stack traces never leak to the frontend
+- DB write failures on search/feedback are non-blocking — the AI response still returns even if the database is down
+- Frontend translates status codes into user-friendly messages (429 → "Too many requests", 503 → "AI unavailable", etc.)
 
 ---
 
 ## Features
 
-- Word suggestions with definitions, example sentences, tone register, origin, emotion tags, and rarity scores
+- Word suggestions with emotion analysis, tone labels, strength ratings, and explanations
 - Sentence rewrite mode with word-by-word change explanations
-- Word of the Day — AI-curated daily vocabulary, cached and served from the database
+- Word of the Day — AI-curated daily vocabulary, cached in the database
 - Vocabulary Bank — save words with custom notes and tags
-- Search history — paginated, with full result recall
+- Search history — stored locally in the browser (private per device)
 - Like/dislike feedback on individual suggestions
+- Dark/light theme toggle with localStorage persistence
+- Vercel Analytics integration
 
 ---
 
@@ -65,44 +117,52 @@ Requests are fired simultaneously to nine free models via OpenRouter. Whichever 
 
 ```
 frontend/                        # React 18 + TypeScript + Vite
+├── src/
+│   ├── components/              # Navbar, Footer, SearchResults, etc.
+│   ├── pages/                   # HomePage, HistoryPage, VocabularyPage
+│   ├── services/
+│   │   ├── api.ts               # Typed API client with error translation
+│   │   └── history.ts           # localStorage history manager
+│   └── hooks/useTheme.ts        # Dark/light theme hook
+
 backend/
 ├── app/
 │   ├── api/routes.py            # All endpoints
 │   ├── core/
 │   │   ├── config.py            # Pydantic settings
-│   │   └── database.py          # Async SQLAlchemy + NeonDB
+│   │   ├── database.py          # Async SQLAlchemy + NeonDB
+│   │   ├── rate_limiter.py      # Sliding window rate limiter
+│   │   └── content_filter.py    # NSFW/abuse regex filter
 │   ├── models/
 │   │   ├── models.py            # ORM models
 │   │   └── schemas.py           # Request/response schemas
 │   ├── services/
-│   │   └── ai_service.py        # Prompt chain + parallel model racing
-│   └── main.py
+│   │   └── ai_service.py        # Single-call pipeline + model racing + cache
+│   └── main.py                  # FastAPI app, CORS, keep-alive
 ```
 
 ### API Endpoints
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `POST` | `/api/search` | Run the 3-step AI pipeline for word suggestions |
-| `POST` | `/api/rewrite` | Rewrite a sentence toward a specified goal |
-| `GET` | `/api/word-of-the-day` | Cached daily word |
+| `POST` | `/api/search` | Content filter → AI pipeline → word suggestions |
+| `POST` | `/api/rewrite` | Content filter → AI rewrite with change explanations |
+| `GET` | `/api/word-of-the-day` | Cached daily word (DB → AI fallback) |
 | `POST` | `/api/saved-words` | Save a word to the vocabulary bank |
 | `GET` | `/api/saved-words` | List saved words |
 | `DELETE` | `/api/saved-words/{id}` | Remove a saved word |
 | `POST` | `/api/feedback` | Submit feedback on a suggestion |
-| `GET` | `/api/history` | Paginated search history |
-| `GET` | `/health` | Health check |
+| `GET` | `/health` | Health check (used by keep-alive + external cron) |
 
 ### Database
 
 PostgreSQL (NeonDB free tier). Schema:
 
 ```
-users
 searches → word_results
 saved_words
 feedback
-word_of_the_day   (cached, updated daily via cron)
+word_of_the_day   (cached daily)
 ```
 
 ---
@@ -142,11 +202,14 @@ Open [http://localhost:5173](http://localhost:5173).
 **Frontend → Vercel**
 Set the root directory to `frontend` and add `VITE_API_URL` pointing to your backend.
 
-**Backend → Railway or Render**
-Set the root directory to `backend`. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`.
+**Backend → Render**
+Set the root directory to `backend`. Start command: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`. Add `RENDER_EXTERNAL_URL` for the keep-alive self-ping.
 
 **Database → NeonDB**
-Copy the connection string and replace `postgresql://` with `postgresql+asyncpg://`. Remove `sslmode=require` from the query string and add `ssl=require` instead.
+Copy the connection string and replace `postgresql://` with `postgresql+asyncpg://`. Replace `sslmode=require` with `ssl=require`.
+
+**Cold start prevention**
+Set up an external cron (e.g., cron-job.org) to ping your `/health` endpoint every 10–14 minutes. The backend also self-pings every 13 minutes while running.
 
 ---
 
@@ -156,10 +219,9 @@ Copy the connection string and replace `postgresql://` with `postgresql+asyncpg:
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string (asyncpg format) |
 | `OPENROUTER_API_KEY` | Yes | From openrouter.ai |
+| `RENDER_EXTERNAL_URL` | No | Backend URL for self-ping keep-alive |
 | `FRONTEND_URL` | No | CORS origin (default: localhost:5173) |
 | `DEBUG` | No | Enable debug mode (default: false) |
-| `RATE_LIMIT_PER_MINUTE` | No | Default: 30 |
-| `RATE_LIMIT_PER_DAY` | No | Default: 500 |
 
 ---
 
@@ -168,10 +230,11 @@ Copy the connection string and replace `postgresql://` with `postgresql+asyncpg:
 | | |
 |---|---|
 | Frontend | React 18, TypeScript, Vite, React Router |
-| Styling | Vanilla CSS — dark theme, glassmorphism |
+| Styling | Vanilla CSS — dark/light theme, glassmorphism |
 | Backend | FastAPI, Python 3.11+, Uvicorn |
 | Database | PostgreSQL via NeonDB, SQLAlchemy (async) |
-| AI | OpenRouter — parallel model racing |
+| AI | OpenRouter — 9-model parallel racing |
+| Analytics | Vercel Analytics |
 | Icons | Lucide React |
 
 ---

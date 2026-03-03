@@ -1,4 +1,4 @@
-# Better Word For
+# Lexify-  Better Word For
 
 AI-powered word suggestions that understand context, emotion, and tone — not just synonyms.
 

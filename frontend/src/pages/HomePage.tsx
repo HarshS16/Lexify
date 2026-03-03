@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Search, RefreshCw } from "lucide-react";
 import { api } from "../services/api";
+import { addToHistory } from "../services/history";
 import type {
     AppMode,
     ToneOption,
@@ -66,6 +67,12 @@ export default function HomePage() {
                     intent,
                 });
                 setSearchResult(result);
+                addToHistory({
+                    input_text: input.trim(),
+                    tone,
+                    intent,
+                    best_fit_word: result.result?.best_fit || null,
+                });
             } else {
                 const result = await api.rewrite({
                     input_text: input.trim(),

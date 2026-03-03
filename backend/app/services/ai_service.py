@@ -1,7 +1,9 @@
 import json
 import asyncio
 import logging
+import time
 from typing import Optional
+from collections import OrderedDict
 import httpx
 from fastapi import HTTPException
 from app.core.config import get_settings
@@ -17,7 +19,7 @@ from datetime import date
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# ── Models to race (verified working free models on OpenRouter) ──
+# ── Verified working free models on OpenRouter ──
 RACE_MODELS = [
     "arcee-ai/trinity-large-preview:free",
     "arcee-ai/trinity-mini:free",
@@ -33,26 +35,54 @@ RACE_MODELS = [
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
+# ── Simple TTL Cache ──
+class TTLCache:
+    """In-memory cache with TTL expiry. Max 200 entries."""
+
+    def __init__(self, ttl_seconds: int = 3600, max_size: int = 200):
+        self.ttl = ttl_seconds
+        self.max_size = max_size
+        self._cache: OrderedDict[str, tuple[float, object]] = OrderedDict()
+
+    def get(self, key: str):
+        if key in self._cache:
+            ts, value = self._cache[key]
+            if time.time() - ts < self.ttl:
+                self._cache.move_to_end(key)
+                return value
+            del self._cache[key]
+        return None
+
+    def set(self, key: str, value: object):
+        if len(self._cache) >= self.max_size:
+            self._cache.popitem(last=False)
+        self._cache[key] = (time.time(), value)
+
+
 class AIService:
-    """OpenRouter-based AI service with parallel model racing."""
+    """OpenRouter AI service — single-call pipeline with parallel model racing."""
 
     def __init__(self):
         self.api_key = settings.OPENROUTER_API_KEY
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
-            "HTTP-Referer": "https://betterwordfor.app",
-            "X-Title": "Better Word For",
+            "HTTP-Referer": "https://lexify.harshjsx.dev",
+            "X-Title": "Lexify",
         }
+        # Persistent HTTP client — reused across all requests
+        self._client = httpx.AsyncClient(timeout=45.0, headers=self.headers)
+        # Cache for repeated queries
+        self._cache = TTLCache(ttl_seconds=3600)
 
     def _parse_json_response(self, text: str) -> dict:
         """Extract JSON from LLM response, handling markdown blocks and trailing text."""
         if not text:
             raise ValueError("AI returned an empty response")
-        
+
         cleaned = text.strip()
-        
-        # 1. Try to find content within markdown code blocks first
+
+        # 1. Try markdown code blocks
         if "```" in cleaned:
             parts = cleaned.split("```")
             for i in range(1, len(parts), 2):
@@ -62,28 +92,25 @@ class AIService:
                 try:
                     return json.loads(inner)
                 except json.JSONDecodeError as e:
-                    # If it's 'extra data', try to fix it by finding the last '}'
                     if "extra data" in str(e).lower():
-                        end_idx = inner.rfind("}") + 1
                         try:
-                            return json.loads(inner[:end_idx])
+                            return json.loads(inner[:inner.rfind("}") + 1])
                         except:
                             continue
                     continue
 
-        # 2. Try parsing the whole string directly
+        # 2. Direct parse
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError as e:
-            # 3. Handle 'extra data' (AI talked after the JSON)
+            # 3. Handle trailing text
             if "extra data" in str(e).lower():
-                end_idx = cleaned.rfind("}") + 1
                 try:
-                    return json.loads(cleaned[:end_idx])
+                    return json.loads(cleaned[:cleaned.rfind("}") + 1])
                 except:
                     pass
 
-            # 4. Last resort: Extract everything between the first '{' and last '}'
+            # 4. Extract first JSON object
             start = cleaned.find("{")
             end = cleaned.rfind("}") + 1
             if start != -1 and end > start:
@@ -91,64 +118,57 @@ class AIService:
                     return json.loads(cleaned[start:end])
                 except json.JSONDecodeError:
                     pass
-            
-            # If everything fails, log the raw text to help us debug
-            logger.error(f"Failed to parse AI response: {text[:500]}...")
+
+            # 5. Try array
+            start = cleaned.find("[")
+            end = cleaned.rfind("]") + 1
+            if start != -1 and end > start:
+                try:
+                    return json.loads(cleaned[start:end])
+                except json.JSONDecodeError:
+                    pass
+
+            logger.error(f"JSON parse failed. Raw response: {text[:500]}")
             raise
 
-    async def _call_model(self, model: str, system_prompt: str, user_prompt: str) -> str:
-        """Call a single model via OpenRouter."""
-        # Combine system + user into one message for maximum model compatibility
-        combined_prompt = f"""### Instructions ###
-{system_prompt}
+    async def _call_model(self, model: str, prompt: str) -> str:
+        """Call a single model via OpenRouter using the persistent client."""
+        response = await self._client.post(
+            OPENROUTER_BASE_URL,
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.3,
+                "max_tokens": 3000,
+            },
+        )
 
-### User Input ###
-{user_prompt}"""
+        if response.status_code != 200:
+            raise Exception(f"{model}: HTTP {response.status_code}")
 
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            response = await client.post(
-                OPENROUTER_BASE_URL,
-                headers=self.headers,
-                json={
-                    "model": model,
-                    "messages": [
-                        {"role": "user", "content": combined_prompt},
-                    ],
-                    "temperature": 0.3,
-                    "max_tokens": 2048,
-                },
-            )
+        data = response.json()
+        if "error" in data:
+            msg = data["error"].get("message", str(data["error"]))
+            raise Exception(f"{model}: {msg}")
 
-            if response.status_code != 200:
-                error_text = response.text[:200]
-                raise Exception(f"Model {model} returned {response.status_code}: {error_text}")
+        content = data.get("choices", [{}])[0].get("message", {}).get("content")
+        if not content:
+            raise Exception(f"{model}: empty response")
 
-            data = response.json()
+        logger.info(f"✅ {model} responded")
+        return content
 
-            if "error" in data:
-                raise Exception(f"Model {model} error: {data['error'].get('message', str(data['error']))}")
-
-            content = data.get("choices", [{}])[0].get("message", {}).get("content")
-            if not content:
-                raise Exception(f"Model {model} returned empty content")
-            logger.info(f"✅ Model {model} responded successfully")
-            return content
-
-    async def _generate(self, system_prompt: str, user_prompt: str) -> str:
+    async def _generate(self, prompt: str) -> str:
         """Race multiple models in parallel — first successful response wins."""
 
         async def try_model(model: str) -> str:
             try:
-                return await self._call_model(model, system_prompt, user_prompt)
+                return await self._call_model(model, prompt)
             except Exception as e:
-                logger.warning(f"❌ Model {model} failed: {e}")
+                logger.warning(f"❌ {model}: {e}")
                 raise
 
-        # Create tasks for all models
         tasks = [asyncio.create_task(try_model(m)) for m in RACE_MODELS]
-
-        # Wait for the first successful result
-        done = set()
         pending = set(tasks)
         last_error = None
 
@@ -159,7 +179,6 @@ class AIService:
             for task in finished:
                 try:
                     result = task.result()
-                    # Cancel remaining tasks
                     for p in pending:
                         p.cancel()
                     return result
@@ -167,190 +186,169 @@ class AIService:
                     last_error = e
                     continue
 
-        # All models failed
-        logger.error(f"All models failed. Last error: {last_error}")
         raise HTTPException(
             status_code=503,
-            detail=f"All AI models failed. Last error: {str(last_error)[:200]}"
+            detail="All AI models are currently unavailable. Please try again in a moment."
         )
 
-    # ── Step 1: Context and Emotion Detection ──────────────
-
-    async def analyze_emotion(
-        self, user_input: str, tone: str = "neutral", intent: str = "general expression"
-    ) -> EmotionAnalysis:
-        system_prompt = """You are a linguistic analysis engine.
-Analyze the user input to extract emotional and contextual intent.
-Do not generate words.
-Respond strictly in valid JSON with these keys:
-- primary_emotion (string)
-- secondary_emotion (string or null)
-- intensity (one of: "low", "medium", "high")
-- context_summary (string, 1-2 sentences)"""
-
-        user_prompt = f"""Input: "{user_input}"
-Tone preference: "{tone}"
-Intent: "{intent}"
-
-Return ONLY valid JSON, no other text."""
-
-        raw = await self._generate(system_prompt, user_prompt)
-        data = self._parse_json_response(raw)
-        return EmotionAnalysis(**data)
-
-    # ── Step 2: Word Generation ────────────────────────────
-
-    async def generate_words(self, analysis: EmotionAnalysis) -> dict:
-        system_prompt = """You are an expert lexicographer and writer.
-Generate emotionally precise words based on the analysis.
-Avoid generic synonyms. Prioritize nuanced, contextually accurate words.
-Rank words by contextual accuracy.
-Respond strictly in valid JSON with these keys:
-- best_fit (string: the single best word)
-- alternatives (array of objects with keys: word, strength)
-  - strength is one of: "low", "medium", "high"
-Generate 5 to 10 alternatives."""
-
-        user_prompt = f"""Emotional analysis:
-{json.dumps(analysis.model_dump(), indent=2)}
-
-Generate:
-- One best-fit word
-- 5-10 alternative words ranked by contextual accuracy
-
-Return ONLY valid JSON, no other text."""
-
-        raw = await self._generate(system_prompt, user_prompt)
-        return self._parse_json_response(raw)
-
-    # ── Step 3: Explanation and Categorization ─────────────
-
-    async def explain_words(self, words_data: dict, context_summary: str) -> list:
-        word_list = [words_data["best_fit"]] + [
-            alt["word"] for alt in words_data.get("alternatives", [])
-        ]
-
-        system_prompt = """Explain word choices clearly and concisely.
-Categorize each word into one or more of: emotional, professional, creative, formal, informal.
-Avoid dictionary-style definitions. Focus on emotional nuance and when to use each word.
-Respond strictly in valid JSON: an array of objects with keys:
-- word (string)
-- categories (array of strings)
-- explanation (string, 1-2 sentences)"""
-
-        user_prompt = f"""Words: {json.dumps(word_list)}
-
-Context: {context_summary}
-
-Return ONLY valid JSON array, no other text."""
-
-        raw = await self._generate(system_prompt, user_prompt)
-        return self._parse_json_response(raw)
-
-    # ── Full Pipeline ──────────────────────────────────────
+    # ── Single-Call Word Search Pipeline ──────────────────
 
     async def find_better_words(
         self, user_input: str, tone: str = "neutral", intent: str = "general expression"
     ) -> WordSuggestionResult:
-        """Execute the full 3-step prompt-chained workflow."""
+        """Single AI call that returns emotion analysis + words + explanations."""
 
-        # Step 1: Analyze emotion
-        analysis = await self.analyze_emotion(user_input, tone, intent)
+        # Check cache first
+        cache_key = f"search:{user_input}:{tone}:{intent}"
+        cached = self._cache.get(cache_key)
+        if cached:
+            logger.info("📦 Cache hit")
+            return cached
 
-        # Step 2: Generate words
-        words_data = await self.generate_words(analysis)
+        prompt = f"""You are an expert linguist and word specialist.
 
-        # Normalize alternatives (AI might return strings instead of dicts)
-        raw_alts = words_data.get("alternatives", [])
-        normalized_alts = []
+A user is searching for better, more precise words. Analyze their input and provide suggestions.
+
+**User Input:** "{user_input}"  
+**Desired Tone:** {tone}  
+**Intent:** {intent}
+
+Respond with a single JSON object containing ALL of the following:
+
+{{
+  "analysis": {{
+    "primary_emotion": "the main emotion detected",
+    "secondary_emotion": "secondary emotion or null",
+    "intensity": "low" | "medium" | "high",
+    "context_summary": "1-2 sentence summary of what the user is trying to express"
+  }},
+  "best_fit": "the single best word",
+  "best_fit_explanation": "why this word is the best fit (1-2 sentences)",
+  "best_fit_categories": ["emotional", "professional", "creative", "formal", or "informal"],
+  "alternatives": [
+    {{
+      "word": "alternative word",
+      "strength": "low" | "medium" | "high",
+      "categories": ["category1", "category2"],
+      "explanation": "why this word fits (1 sentence)"
+    }}
+  ]
+}}
+
+Generate 5-8 alternatives. Avoid generic synonyms. Focus on emotionally precise, contextually accurate words.
+Return ONLY valid JSON, no other text."""
+
+        raw = await self._generate(prompt)
+        data = self._parse_json_response(raw)
+
+        # Normalize analysis
+        analysis_data = data.get("analysis", {})
+        analysis = EmotionAnalysis(
+            primary_emotion=analysis_data.get("primary_emotion", "neutral"),
+            secondary_emotion=analysis_data.get("secondary_emotion"),
+            intensity=analysis_data.get("intensity", "medium"),
+            context_summary=analysis_data.get("context_summary", ""),
+        )
+
+        # Normalize alternatives
+        raw_alts = data.get("alternatives", [])
+        alternatives = []
         for alt in raw_alts:
             if isinstance(alt, str):
-                normalized_alts.append({"word": alt, "strength": "medium"})
+                alternatives.append(WordAlternative(
+                    word=alt, strength="medium", categories=[], explanation=""
+                ))
             elif isinstance(alt, dict):
-                normalized_alts.append(alt)
-        words_data["alternatives"] = normalized_alts
+                alternatives.append(WordAlternative(
+                    word=alt.get("word", ""),
+                    strength=alt.get("strength", "medium"),
+                    categories=alt.get("categories", []),
+                    explanation=alt.get("explanation", ""),
+                ))
 
-        # Step 3: Explain and categorize
-        explanations = await self.explain_words(words_data, analysis.context_summary)
-
-        # Normalize explanations (AI might return strings instead of dicts)
-        explanation_map = {}
-        if isinstance(explanations, list):
-            for e in explanations:
-                if isinstance(e, dict) and "word" in e:
-                    explanation_map[e["word"]] = e
-                elif isinstance(e, str):
-                    explanation_map[e] = {"word": e, "categories": [], "explanation": ""}
-
-        # Build best_fit info
-        best_fit_info = explanation_map.get(words_data["best_fit"], {})
-
-        # Build alternatives with explanations
-        alternatives = []
-        for alt in words_data.get("alternatives", []):
-            word = alt.get("word", "") if isinstance(alt, dict) else str(alt)
-            exp = explanation_map.get(word, {})
-            alternatives.append(
-                WordAlternative(
-                    word=word,
-                    strength=alt.get("strength", "medium") if isinstance(alt, dict) else "medium",
-                    categories=exp.get("categories", []),
-                    explanation=exp.get("explanation", ""),
-                )
-            )
-
-        return WordSuggestionResult(
-            best_fit=words_data["best_fit"],
-            best_fit_explanation=best_fit_info.get("explanation", ""),
-            best_fit_categories=best_fit_info.get("categories", []),
+        result = WordSuggestionResult(
+            best_fit=data.get("best_fit", ""),
+            best_fit_explanation=data.get("best_fit_explanation", ""),
+            best_fit_categories=data.get("best_fit_categories", []),
             alternatives=alternatives,
             analysis=analysis,
         )
+
+        # Cache the result
+        self._cache.set(cache_key, result)
+        return result
 
     # ── Rewrite Mode ───────────────────────────────────────
 
     async def rewrite_sentence(
         self, input_text: str, goal: str, tone: str = "neutral"
     ) -> RewriteResult:
-        system_prompt = """You are an expert writing coach.
-Rewrite the sentence to match the user's goal.
-Highlight every word change with a reason.
-Respond strictly in valid JSON with keys:
-- original (string)
-- rewritten (string)
-- changes (array of objects: {original_word, new_word, reason})"""
 
-        user_prompt = f"""Sentence: "{input_text}"
-Goal: "{goal}"
-Tone: "{tone}"
+        cache_key = f"rewrite:{input_text}:{goal}:{tone}"
+        cached = self._cache.get(cache_key)
+        if cached:
+            return cached
+
+        prompt = f"""You are an expert writing coach.
+
+Rewrite the sentence to match the user's goal. Highlight every word change with a reason.
+
+**Sentence:** "{input_text}"  
+**Goal:** {goal}  
+**Tone:** {tone}
+
+Respond with a single JSON object:
+{{
+  "original": "the original sentence",
+  "rewritten": "the rewritten sentence",
+  "changes": [
+    {{"original_word": "old", "new_word": "new", "reason": "why this change"}}
+  ]
+}}
 
 Return ONLY valid JSON, no other text."""
 
-        raw = await self._generate(system_prompt, user_prompt)
+        raw = await self._generate(prompt)
         data = self._parse_json_response(raw)
         data["goal"] = goal
-        return RewriteResult(**data)
+        result = RewriteResult(**data)
+
+        self._cache.set(cache_key, result)
+        return result
 
     # ── Word of the Day ────────────────────────────────────
 
     async def generate_word_of_the_day(self) -> WordOfTheDayResponse:
-        system_prompt = """You are an AI vocabulary curator.
+
+        cache_key = f"wotd:{date.today()}"
+        cached = self._cache.get(cache_key)
+        if cached:
+            return cached
+
+        prompt = """You are an AI vocabulary curator.
+
 Generate one interesting, nuanced word that most people don't use enough.
-Do not pick common words. Pick words that are expressive, emotionally rich, or beautifully specific.
-Respond strictly in valid JSON with keys:
-- word (string)
-- meaning (string, 1-2 sentences, not dictionary-style)
-- emotional_range (string, what emotions this word can express)
-- example_usage (string, a natural sentence using the word)
-- when_to_use (string, 1 sentence)
-- when_to_avoid (string, 1 sentence)"""
+Pick words that are expressive, emotionally rich, or beautifully specific.
 
-        user_prompt = "Generate today's Word of the Day. Return ONLY valid JSON, no other text."
+Respond with a single JSON object:
+{
+  "word": "the word",
+  "meaning": "1-2 sentences, not dictionary-style",
+  "emotional_range": "what emotions this word can express",
+  "example_usage": "a natural sentence using the word",
+  "when_to_use": "1 sentence",
+  "when_to_avoid": "1 sentence"
+}
 
-        raw = await self._generate(system_prompt, user_prompt)
+Return ONLY valid JSON, no other text."""
+
+        raw = await self._generate(prompt)
         data = self._parse_json_response(raw)
         data["date"] = date.today()
-        return WordOfTheDayResponse(**data)
+        result = WordOfTheDayResponse(**data)
+
+        self._cache.set(cache_key, result)
+        return result
 
 
 # Singleton
@@ -359,5 +357,8 @@ ai_service = AIService() if settings.OPENROUTER_API_KEY else None
 
 def get_ai_service() -> AIService:
     if ai_service is None:
-        raise RuntimeError("OPENROUTER_API_KEY not configured. Set it in .env file.")
+        raise HTTPException(
+            status_code=503,
+            detail="AI service not configured. Set OPENROUTER_API_KEY in environment."
+        )
     return ai_service

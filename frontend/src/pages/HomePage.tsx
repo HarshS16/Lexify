@@ -238,8 +238,10 @@ export default function HomePage() {
             {/* Error */}
             {error && (
                 <div className="error-banner" id="error-banner">
-                    <span>⚠️</span>
-                    <span>{error}</span>
+                    <span>⚠️ {error}</span>
+                    <button className="btn-secondary" onClick={handleSearch} style={{ marginLeft: "auto", padding: "6px 16px", fontSize: "0.85rem" }}>
+                        Retry
+                    </button>
                 </div>
             )}
 

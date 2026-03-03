@@ -16,7 +16,7 @@ export default function Navbar() {
             <div className="navbar-inner">
                 <Link to="/" className="navbar-logo">
                     <div className="logo-icon">✦</div>
-                    <span className="logo-text-gradient">BetterWordFor</span>
+                    <span className="logo-text-gradient">Lexify</span>
                 </Link>
 
                 <div className="navbar-nav">

@@ -1,5 +1,6 @@
 import uuid
-from datetime import date, datetime
+import logging
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
@@ -17,8 +18,9 @@ from app.models.schemas import (
     HistoryResponse,
     WordOfTheDayResponse,
 )
-from app.services.ai_service import get_ai_service, AIService
+from app.services.ai_service import get_ai_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -32,38 +34,42 @@ async def search_words(
     """Main endpoint: find better words for user input."""
     ai = get_ai_service()
 
-    # Run AI pipeline
+    # Run AI pipeline (single call)
     result = await ai.find_better_words(
         user_input=request.input_text,
         tone=request.tone or "neutral",
         intent=request.intent or "general expression",
     )
 
-    # Store search in DB
-    search = Search(
-        id=uuid.uuid4(),
-        input_text=request.input_text,
-        tone=request.tone,
-        intent=request.intent,
-        analysis_json=result.analysis.model_dump(),
-    )
-    db.add(search)
+    # Store in DB — non-blocking (don't fail the response if DB errors)
+    search_id = uuid.uuid4()
+    try:
+        search = Search(
+            id=search_id,
+            input_text=request.input_text,
+            tone=request.tone,
+            intent=request.intent,
+            analysis_json=result.analysis.model_dump(),
+        )
+        db.add(search)
 
-    # Store word result
-    word_result = WordResult(
-        id=uuid.uuid4(),
-        search_id=search.id,
-        best_fit_word=result.best_fit,
-        alternatives_json=[alt.model_dump() for alt in result.alternatives],
-        explanations_json={
-            "best_fit_explanation": result.best_fit_explanation,
-            "best_fit_categories": result.best_fit_categories,
-        },
-    )
-    db.add(word_result)
-    await db.flush()
+        word_result = WordResult(
+            id=uuid.uuid4(),
+            search_id=search.id,
+            best_fit_word=result.best_fit,
+            alternatives_json=[alt.model_dump() for alt in result.alternatives],
+            explanations_json={
+                "best_fit_explanation": result.best_fit_explanation,
+                "best_fit_categories": result.best_fit_categories,
+            },
+        )
+        db.add(word_result)
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"DB write failed (search still returned): {e}")
+        await db.rollback()
 
-    return SearchResponse(search_id=search.id, result=result)
+    return SearchResponse(search_id=search_id, result=result)
 
 
 # ── Rewrite Mode ───────────────────────────────────────────
@@ -83,44 +89,51 @@ async def rewrite_sentence(request: RewriteRequest):
 
 @router.get("/word-of-the-day", response_model=WordOfTheDayResponse)
 async def get_word_of_the_day(db: AsyncSession = Depends(get_db)):
-    """Get today's Word of the Day (cached in DB for 24h)."""
+    """Get today's Word of the Day (cached in DB)."""
     today = date.today()
 
-    # Check if we already have today's word
-    stmt = select(WordOfTheDay).where(WordOfTheDay.date == today)
-    result = await db.execute(stmt)
-    existing = result.scalar_one_or_none()
+    # Check DB cache first
+    try:
+        stmt = select(WordOfTheDay).where(WordOfTheDay.date == today)
+        result = await db.execute(stmt)
+        existing = result.scalar_one_or_none()
 
-    if existing:
-        return WordOfTheDayResponse(
-            date=existing.date,
-            word=existing.word,
-            **(existing.data_json or {}),
-        )
+        if existing:
+            return WordOfTheDayResponse(
+                date=existing.date,
+                word=existing.word,
+                **(existing.data_json or {}),
+            )
+    except Exception as e:
+        logger.warning(f"DB read failed for WOTD: {e}")
 
     # Generate new word
     ai = get_ai_service()
     wotd = await ai.generate_word_of_the_day()
 
-    # Store in DB
-    db_wotd = WordOfTheDay(
-        date=today,
-        word=wotd.word,
-        data_json={
-            "meaning": wotd.meaning,
-            "emotional_range": wotd.emotional_range,
-            "example_usage": wotd.example_usage,
-            "when_to_use": wotd.when_to_use,
-            "when_to_avoid": wotd.when_to_avoid,
-        },
-    )
-    db.add(db_wotd)
-    await db.flush()
+    # Store in DB — non-blocking
+    try:
+        db_wotd = WordOfTheDay(
+            date=today,
+            word=wotd.word,
+            data_json={
+                "meaning": wotd.meaning,
+                "emotional_range": wotd.emotional_range,
+                "example_usage": wotd.example_usage,
+                "when_to_use": wotd.when_to_use,
+                "when_to_avoid": wotd.when_to_avoid,
+            },
+        )
+        db.add(db_wotd)
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"DB write failed for WOTD: {e}")
+        await db.rollback()
 
     return wotd
 
 
-# ── Saved Words (Vocabulary Bank) ──────────────────────────
+# ── Saved Words ──────────────────────────────────────
 
 @router.post("/saved-words", response_model=SavedWordResponse)
 async def save_word(
@@ -135,7 +148,7 @@ async def save_word(
         tags=request.tags or [],
     )
     db.add(saved)
-    await db.flush()
+    await db.commit()
 
     return SavedWordResponse(
         id=saved.id,
@@ -177,6 +190,7 @@ async def delete_saved_word(
     if not word:
         raise HTTPException(status_code=404, detail="Word not found")
     await db.delete(word)
+    await db.commit()
     return {"message": "Word deleted"}
 
 
@@ -188,14 +202,18 @@ async def submit_feedback(
     db: AsyncSession = Depends(get_db),
 ):
     """Submit feedback (like/dislike) for a word."""
-    fb = Feedback(
-        id=uuid.uuid4(),
-        search_id=request.search_id,
-        word=request.word,
-        rating=request.rating,
-    )
-    db.add(fb)
-    await db.flush()
+    try:
+        fb = Feedback(
+            id=uuid.uuid4(),
+            search_id=request.search_id,
+            word=request.word,
+            rating=request.rating,
+        )
+        db.add(fb)
+        await db.commit()
+    except Exception as e:
+        logger.warning(f"Feedback DB write failed: {e}")
+        await db.rollback()
     return {"message": "Feedback submitted"}
 
 
@@ -208,12 +226,10 @@ async def get_history(
     db: AsyncSession = Depends(get_db),
 ):
     """Get search history."""
-    # Count total
     count_stmt = select(func.count()).select_from(Search)
     total_result = await db.execute(count_stmt)
-    total = total_result.scalar()
+    total = total_result.scalar() or 0
 
-    # Fetch history items
     stmt = (
         select(Search, WordResult)
         .outerjoin(WordResult, Search.id == WordResult.search_id)

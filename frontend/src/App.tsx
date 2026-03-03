@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route } from "react-router-dom";
 import Navbar from "./components/Navbar";
+import Footer from "./components/Footer";
 import HomePage from "./pages/HomePage";
 import WordOfTheDayPage from "./pages/WordOfTheDayPage";
 import VocabularyPage from "./pages/VocabularyPage";
@@ -16,6 +17,7 @@ function App() {
           <Route path="/vocabulary" element={<VocabularyPage />} />
           <Route path="/history" element={<HistoryPage />} />
         </Routes>
+        <Footer />
       </div>
     </BrowserRouter>
   );

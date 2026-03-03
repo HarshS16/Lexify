@@ -167,6 +167,83 @@ a:hover {
   color: var(--accent-primary);
 }
 
+/* ── Footer ─────────────────────────────────────────────── */
+.footer {
+  padding: var(--space-xl) var(--space-lg);
+  border-top: 1px solid var(--border-subtle);
+  text-align: center;
+  margin-top: auto;
+}
+
+.footer-inner {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.footer-text {
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.footer-heart {
+  color: var(--accent-warm);
+  display: inline-block;
+  animation: heartbeat 1.5s ease-in-out infinite;
+}
+
+.footer-link {
+  color: var(--accent-primary-light);
+  font-weight: 600;
+  transition: all var(--transition-normal);
+  position: relative;
+}
+
+.footer-link:hover {
+  color: var(--accent-secondary-light);
+}
+
+.footer-link::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  width: 0;
+  height: 1.5px;
+  background: var(--gradient-primary);
+  transition: width var(--transition-normal);
+}
+
+.footer-link:hover::after {
+  width: 100%;
+}
+
+@keyframes heartbeat {
+
+  0%,
+  100% {
+    transform: scale(1);
+  }
+
+  15% {
+    transform: scale(1.25);
+  }
+
+  30% {
+    transform: scale(1);
+  }
+
+  45% {
+    transform: scale(1.15);
+  }
+
+  60% {
+    transform: scale(1);
+  }
+}
+
 /* ── Scrollbar ───────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 6px;

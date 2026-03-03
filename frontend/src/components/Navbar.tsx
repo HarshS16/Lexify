@@ -1,18 +1,14 @@
 import { Link, useLocation } from "react-router-dom";
-import { Search, BookOpen, Clock, Sparkles } from "lucide-react";
+import { Search, BookOpen, Clock, Sun, Moon } from "lucide-react";
+import { useTheme } from "../hooks/useTheme";
 
 export default function Navbar() {
     const location = useLocation();
-
-    const links = [
-        { to: "/", icon: Search, label: "Search" },
-        { to: "/word-of-the-day", icon: Sparkles, label: "Word of the Day" },
-        { to: "/vocabulary", icon: BookOpen, label: "Vocabulary" },
-        { to: "/history", icon: Clock, label: "History" },
-    ];
+    const { theme, toggle } = useTheme();
+    const isActive = (path: string) => location.pathname === path;
 
     return (
-        <nav className="navbar" id="main-navbar">
+        <nav className="navbar">
             <div className="navbar-inner">
                 <Link to="/" className="navbar-logo">
                     <div className="logo-icon">✦</div>
@@ -20,17 +16,27 @@ export default function Navbar() {
                 </Link>
 
                 <div className="navbar-nav">
-                    {links.map(({ to, icon: Icon, label }) => (
-                        <Link
-                            key={to}
-                            to={to}
-                            className={`nav-link ${location.pathname === to ? "active" : ""}`}
-                            id={`nav-${label.toLowerCase().replace(/\s+/g, "-")}`}
-                        >
-                            <Icon size={16} />
-                            <span>{label}</span>
-                        </Link>
-                    ))}
+                    <Link to="/" className={`nav-link ${isActive("/") ? "active" : ""}`}>
+                        <Search size={15} />
+                        <span>Search</span>
+                    </Link>
+                    <Link to="/vocabulary" className={`nav-link ${isActive("/vocabulary") ? "active" : ""}`}>
+                        <BookOpen size={15} />
+                        <span>Vocabulary</span>
+                    </Link>
+                    <Link to="/history" className={`nav-link ${isActive("/history") ? "active" : ""}`}>
+                        <Clock size={15} />
+                        <span>History</span>
+                    </Link>
+
+                    <button
+                        className="theme-toggle"
+                        onClick={toggle}
+                        title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}
+                        aria-label="Toggle theme"
+                    >
+                        {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
+                    </button>
                 </div>
             </div>
         </nav>

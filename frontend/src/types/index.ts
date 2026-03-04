@@ -12,11 +12,13 @@ export interface WordAlternative {
   strength: "low" | "medium" | "high";
   categories: string[];
   explanation: string;
+  example_sentence?: string;
 }
 
 export interface WordSuggestionResult {
   best_fit: string;
   best_fit_explanation: string;
+  best_fit_example_sentence?: string;
   best_fit_categories: string[];
   alternatives: WordAlternative[];
   analysis: EmotionAnalysis;

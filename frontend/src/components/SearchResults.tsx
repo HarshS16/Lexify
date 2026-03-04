@@ -28,7 +28,7 @@ function getIntensityClass(intensity: string): string {
 }
 
 export default function SearchResults({ result, onSaveWord, onFeedback }: SearchResultsProps) {
-    const { best_fit, best_fit_explanation, best_fit_categories, alternatives, analysis } = result;
+    const { best_fit, best_fit_explanation, best_fit_example_sentence, best_fit_categories, alternatives, analysis } = result;
 
     return (
         <div className="results-section" id="search-results">
@@ -64,6 +64,12 @@ export default function SearchResults({ result, onSaveWord, onFeedback }: Search
                 <div className="best-fit-word">{best_fit}</div>
                 {best_fit_explanation && (
                     <div className="best-fit-explanation">{best_fit_explanation}</div>
+                )}
+                {best_fit_example_sentence && (
+                    <div className="example-sentence" id="best-fit-example">
+                        <span className="example-sentence-icon">❝</span>
+                        <p className="example-sentence-text">{best_fit_example_sentence}</p>
+                    </div>
                 )}
                 {best_fit_categories && best_fit_categories.length > 0 && (
                     <div className="best-fit-categories">
@@ -118,6 +124,12 @@ export default function SearchResults({ result, onSaveWord, onFeedback }: Search
                         </div>
                         {alt.explanation && (
                             <p className="alt-explanation">{alt.explanation}</p>
+                        )}
+                        {alt.example_sentence && (
+                            <div className="example-sentence example-sentence-alt">
+                                <span className="example-sentence-icon">❝</span>
+                                <p className="example-sentence-text">{alt.example_sentence}</p>
+                            </div>
                         )}
                         {alt.categories && alt.categories.length > 0 && (
                             <div className="alt-categories">

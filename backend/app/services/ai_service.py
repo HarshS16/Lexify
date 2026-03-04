@@ -139,7 +139,7 @@ class AIService:
                 "model": model,
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": 0.3,
-                "max_tokens": 1200,
+                "max_tokens": 1800,
             },
         )
 
@@ -221,13 +221,14 @@ Return ONLY this JSON:
   }},
   "best_fit": "best word",
   "best_fit_explanation": "why (1-2 sentences)",
+  "best_fit_example_sentence": "a natural example sentence using the best fit word",
   "best_fit_categories": ["emotional"|"professional"|"creative"|"formal"|"informal"],
   "alternatives": [
-    {{"word": "word", "strength": "low|medium|high", "categories": [], "explanation": "1 sentence"}}
+    {{"word": "word", "strength": "low|medium|high", "categories": [], "explanation": "1 sentence", "example_sentence": "a natural example sentence using this word"}}
   ]
 }}
 
-5-8 alternatives. Emotionally precise, not generic synonyms. ONLY valid JSON."""
+5-8 alternatives. Emotionally precise, not generic synonyms. Each example_sentence must be a natural, realistic sentence demonstrating how the word is used. ONLY valid JSON."""
 
         raw = await self._generate(prompt)
         data = self._parse_json_response(raw)
@@ -255,11 +256,13 @@ Return ONLY this JSON:
                     strength=alt.get("strength", "medium"),
                     categories=alt.get("categories", []),
                     explanation=alt.get("explanation", ""),
+                    example_sentence=alt.get("example_sentence", ""),
                 ))
 
         result = WordSuggestionResult(
             best_fit=data.get("best_fit", ""),
             best_fit_explanation=data.get("best_fit_explanation", ""),
+            best_fit_example_sentence=data.get("best_fit_example_sentence", ""),
             best_fit_categories=data.get("best_fit_categories", []),
             alternatives=alternatives,
             analysis=analysis,

@@ -55,7 +55,7 @@ Models are ordered fastest-first. Timeout is 20 seconds — if a model hasn't re
 | **Persistent HTTP client** | One shared `httpx.AsyncClient` reused across all requests. Avoids TCP/TLS handshake overhead (~200-500ms saved per request). |
 | **In-memory TTL cache** | Identical queries within 1 hour return instantly from cache. LRU eviction at 200 entries. |
 | **Compressed prompts** | ~100 input tokens instead of ~180. Less tokenization time, faster model processing. |
-| **Reduced max_tokens** | Capped at 1,200 instead of 3,000. Models stop generating sooner since actual responses are ~500 tokens. |
+| **Reduced max_tokens** | Capped at 1,800 instead of 3,000. Models stop generating sooner since actual responses are ~700 tokens. |
 | **Keep-alive self-ping** | Background task pings `/health` every 13 minutes to prevent Render free-tier cold starts. |
 
 Typical response times:
@@ -173,17 +173,81 @@ word_of_the_day   (cached daily)
 
 ### Backend
 
-```bash
-cd backend
-python -m venv venv
-source venv/bin/activate      # Windows: .\venv\Scripts\activate
-pip install -r requirements.txt
+1. **Navigate to the backend directory:**
 
-cp .env.example .env
-# Fill in DATABASE_URL and OPENROUTER_API_KEY
+   ```bash
+   cd backend
+   ```
 
-uvicorn app.main:app --reload --port 8000
-```
+2. **Create and activate a virtual environment:**
+
+   ```bash
+   python -m venv venv
+   ```
+
+   - **Windows (PowerShell):**
+     ```powershell
+     .\venv\Scripts\Activate.ps1
+     ```
+   - **Windows (CMD):**
+     ```cmd
+     .\venv\Scripts\activate.bat
+     ```
+   - **macOS / Linux:**
+     ```bash
+     source venv/bin/activate
+     ```
+
+3. **Install dependencies:**
+
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   This installs: FastAPI, Uvicorn, SQLAlchemy (async), asyncpg, httpx, Pydantic, python-dotenv, and Alembic.
+
+4. **Set up environment variables:**
+
+   ```bash
+   cp .env.example .env
+   ```
+
+   > On Windows CMD, use `copy .env.example .env` instead.
+
+   Open `.env` and fill in the required values:
+
+   ```env
+   # Required — NeonDB PostgreSQL connection string
+   # Use postgresql+asyncpg:// prefix and ?ssl=require (NOT sslmode=require)
+   DATABASE_URL=postgresql+asyncpg://user:password@your-host.neon.tech/dbname?ssl=require
+
+   # Required — Get your free API key from https://openrouter.ai/keys
+   OPENROUTER_API_KEY=sk-or-v1-your-key-here
+
+   # Optional
+   DEBUG=false
+   FRONTEND_URL=http://localhost:5173
+   RATE_LIMIT_PER_MINUTE=30
+   RATE_LIMIT_PER_DAY=500
+   ```
+
+5. **Start the development server:**
+
+   ```bash
+   uvicorn app.main:app --reload --port 8000
+   ```
+
+   The server will:
+   - Auto-create all database tables on first startup (no migrations needed)
+   - Start listening at [http://localhost:8000](http://localhost:8000)
+   - Show interactive API docs at [http://localhost:8000/docs](http://localhost:8000/docs)
+
+6. **Verify it's running:**
+
+   ```bash
+   curl http://localhost:8000/health
+   # Expected: {"status":"healthy"}
+   ```
 
 ### Frontend
 

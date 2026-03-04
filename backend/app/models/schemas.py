@@ -44,11 +44,13 @@ class WordAlternative(BaseModel):
     strength: str  # low / medium / high
     categories: Optional[List[str]] = []
     explanation: Optional[str] = None
+    example_sentence: Optional[str] = None
 
 
 class WordSuggestionResult(BaseModel):
     best_fit: str
     best_fit_explanation: Optional[str] = None
+    best_fit_example_sentence: Optional[str] = None
     best_fit_categories: Optional[List[str]] = []
     alternatives: List[WordAlternative]
     analysis: EmotionAnalysis

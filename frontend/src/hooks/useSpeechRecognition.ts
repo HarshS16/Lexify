@@ -35,6 +35,12 @@ function getSpeechRecognition(): SpeechRecognitionConstructor | null {
     );
 }
 
+function isBraveBrowser(): boolean {
+    // Brave exposes navigator.brave, and its UA contains Chrome
+    const nav = navigator as unknown as Record<string, unknown>;
+    return !!nav.brave;
+}
+
 interface UseSpeechRecognitionOptions {
     /** Called with the final transcript when speech ends */
     onResult: (text: string) => void;
@@ -110,9 +116,16 @@ export function useSpeechRecognition({
             // "aborted" happens when we manually stop — don't surface it
             if (event.error === "aborted") return;
 
-            // Network errors: silently retry up to MAX_RETRIES times
-            // This is a known issue with Chrome's SpeechRecognition on deployed
-            // HTTPS sites — the initial connection to Google's servers can fail.
+            // Brave blocks Web Speech API connections to Google's servers.
+            // Retrying won't help — show a specific message immediately.
+            if (event.error === "network" && isBraveBrowser()) {
+                setIsListening(false);
+                onError?.("Brave blocks speech recognition for privacy. Please use Chrome or Edge for voice input.");
+                return;
+            }
+
+            // Network errors on other browsers: silently retry up to MAX_RETRIES times.
+            // Chrome on HTTPS can briefly fail connecting to Google's speech servers.
             if (event.error === "network" && retriesRef.current < MAX_RETRIES) {
                 retriesRef.current++;
                 setTimeout(() => startListening(true), RETRY_DELAY_MS);
@@ -123,7 +136,7 @@ export function useSpeechRecognition({
             const messages: Record<string, string> = {
                 "not-allowed": "Microphone access was denied. Please allow it in your browser settings.",
                 "no-speech": "No speech detected. Please try again.",
-                network: "Speech recognition is unavailable. This may be a browser limitation — try Chrome or Edge.",
+                network: "Speech recognition is unavailable. Please try Chrome or Edge.",
             };
             const msg = messages[event.error] ?? `Speech recognition error: ${event.error}`;
             onError?.(msg);

@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     # AI Provider (OpenRouter)
     OPENROUTER_API_KEY: str = ""
 
+    # Speech-to-Text (Groq Whisper) — fallback for Brave browser
+    GROQ_API_KEY: str = ""
+
     # App
     APP_NAME: str = "Better Word For"
     DEBUG: bool = False

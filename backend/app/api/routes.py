@@ -1,7 +1,7 @@
 import uuid
 import logging
 from datetime import date
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, desc, func
 from app.core.database import get_db
@@ -20,6 +20,8 @@ from app.models.schemas import (
 )
 from app.services.ai_service import get_ai_service
 from app.core.content_filter import is_safe, BLOCKED_RESPONSE
+from app.core.config import get_settings
+import httpx
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -260,3 +262,49 @@ async def get_history(
     ]
 
     return HistoryResponse(items=items, total=total)
+
+
+# ── Speech-to-Text (Brave fallback) ────────────────────────
+
+@router.post("/transcribe")
+async def transcribe_audio(audio: UploadFile = File(...)):
+    """Transcribe audio using Groq Whisper — fallback for browsers that block Web Speech API."""
+    settings = get_settings()
+    if not settings.GROQ_API_KEY:
+        raise HTTPException(status_code=503, detail="Speech-to-text service not configured.")
+
+    # Read the uploaded audio
+    audio_bytes = await audio.read()
+    if len(audio_bytes) > 5 * 1024 * 1024:  # 5MB limit
+        raise HTTPException(status_code=413, detail="Audio file too large (max 5MB).")
+
+    if len(audio_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty audio file.")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {settings.GROQ_API_KEY}"},
+                files={"file": (audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm")},
+                data={"model": "whisper-large-v3", "language": "en"},
+            )
+
+        if response.status_code != 200:
+            logger.error(f"Groq Whisper error: {response.status_code} {response.text[:200]}")
+            raise HTTPException(status_code=502, detail="Transcription service error.")
+
+        data = response.json()
+        text = data.get("text", "").strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="No speech detected in audio.")
+
+        return {"text": text}
+
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Transcription timed out. Please try again.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Transcription failed: {e}")
+        raise HTTPException(status_code=500, detail="Transcription failed.")

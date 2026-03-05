@@ -76,4 +76,26 @@ export const api = {
 
     getHistory: (limit = 20, offset = 0) =>
         request<HistoryResponse>(`/history?limit=${limit}&offset=${offset}`),
+
+    transcribe: async (audioBlob: Blob): Promise<{ text: string }> => {
+        const formData = new FormData();
+        formData.append("audio", audioBlob, "recording.webm");
+
+        let res: Response;
+        try {
+            res = await fetch(`${API_BASE}/transcribe`, {
+                method: "POST",
+                body: formData,
+            });
+        } catch {
+            throw new Error("Unable to reach the server. Check your internet connection.");
+        }
+
+        if (!res.ok) {
+            const error = await res.json().catch(() => ({ detail: "" }));
+            throw new Error(friendlyError(res.status, error.detail || ""));
+        }
+
+        return res.json();
+    },
 };

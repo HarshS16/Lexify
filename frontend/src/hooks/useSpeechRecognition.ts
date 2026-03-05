@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect } from "react";
+import { api } from "../services/api";
 
-// Extend Window to include vendor-prefixed SpeechRecognition
+// ── Type definitions for Web Speech API ──────────────────────
+
 interface SpeechRecognitionEvent extends Event {
     results: SpeechRecognitionResultList;
     resultIndex: number;
@@ -36,61 +38,133 @@ function getSpeechRecognition(): SpeechRecognitionConstructor | null {
 }
 
 function isBraveBrowser(): boolean {
-    // Brave exposes navigator.brave, and its UA contains Chrome
     const nav = navigator as unknown as Record<string, unknown>;
     return !!nav.brave;
 }
 
+// ── Hook interface ───────────────────────────────────────────
+
 interface UseSpeechRecognitionOptions {
-    /** Called with the final transcript when speech ends */
     onResult: (text: string) => void;
-    /** Called when an error occurs */
     onError?: (error: string) => void;
-    /** BCP-47 language tag, default "en-US" */
     lang?: string;
 }
 
 interface UseSpeechRecognitionReturn {
-    /** Whether the browser supports the Web Speech API */
     isSupported: boolean;
-    /** Whether the microphone is currently listening */
     isListening: boolean;
-    /** Toggle listening on/off */
     toggleListening: () => void;
 }
+
+// ── Hook implementation ──────────────────────────────────────
 
 export function useSpeechRecognition({
     onResult,
     onError,
     lang = "en-US",
 }: UseSpeechRecognitionOptions): UseSpeechRecognitionReturn {
-    const isSupported = !!getSpeechRecognition();
+    const brave = isBraveBrowser();
+    // Supported if: browser has SpeechRecognition (non-Brave) OR has MediaRecorder (Brave fallback)
+    const isSupported = brave
+        ? typeof MediaRecorder !== "undefined"
+        : !!getSpeechRecognition();
+
     const [isListening, setIsListening] = useState(false);
+
+    // Refs for Web Speech API path
     const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
     const retriesRef = useRef(0);
     const MAX_RETRIES = 3;
     const RETRY_DELAY_MS = 300;
 
+    // Refs for MediaRecorder (Brave) path
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const mediaStreamRef = useRef<MediaStream | null>(null);
+    const chunksRef = useRef<Blob[]>([]);
+
     // Clean up on unmount
     useEffect(() => {
         return () => {
-            if (recognitionRef.current) {
-                recognitionRef.current.abort();
-                recognitionRef.current = null;
-            }
+            recognitionRef.current?.abort();
+            mediaRecorderRef.current?.stop();
+            mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
         };
     }, []);
 
-    const startListening = useCallback((isRetry = false) => {
+    // ── Brave path: MediaRecorder → backend Whisper ──────────
+
+    const startBraveListening = useCallback(async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaStreamRef.current = stream;
+            chunksRef.current = [];
+
+            const recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
+            mediaRecorderRef.current = recorder;
+
+            recorder.ondataavailable = (e) => {
+                if (e.data.size > 0) chunksRef.current.push(e.data);
+            };
+
+            recorder.onstop = async () => {
+                // Release mic immediately
+                stream.getTracks().forEach((t) => t.stop());
+                mediaStreamRef.current = null;
+
+                const audioBlob = new Blob(chunksRef.current, { type: "audio/webm" });
+                chunksRef.current = [];
+
+                if (audioBlob.size === 0) {
+                    setIsListening(false);
+                    onError?.("No audio captured. Please try again.");
+                    return;
+                }
+
+                // Send to backend for transcription
+                try {
+                    const { text } = await api.transcribe(audioBlob);
+                    onResult(text);
+                } catch (err) {
+                    const msg = err instanceof Error ? err.message : "Transcription failed.";
+                    onError?.(msg);
+                } finally {
+                    setIsListening(false);
+                }
+            };
+
+            recorder.onerror = () => {
+                stream.getTracks().forEach((t) => t.stop());
+                setIsListening(false);
+                onError?.("Audio recording failed. Please try again.");
+            };
+
+            recorder.start();
+            setIsListening(true);
+        } catch {
+            setIsListening(false);
+            onError?.("Microphone access was denied. Please allow it in your browser settings.");
+        }
+    }, [onResult, onError]);
+
+    const stopBraveListening = useCallback(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+            mediaRecorderRef.current.stop(); // triggers onstop → transcription
+        } else {
+            mediaStreamRef.current?.getTracks().forEach((t) => t.stop());
+            setIsListening(false);
+        }
+    }, []);
+
+    // ── Standard path: Web Speech API ────────────────────────
+
+    const startWebSpeechListening = useCallback((isRetry = false) => {
         const SpeechRecognition = getSpeechRecognition();
         if (!SpeechRecognition) return;
 
-        // Stop any existing session
         if (recognitionRef.current) {
             recognitionRef.current.abort();
         }
 
-        // Reset retry counter on fresh start (not a retry)
         if (!isRetry) {
             retriesRef.current = 0;
         }
@@ -100,35 +174,20 @@ export function useSpeechRecognition({
         recognition.continuous = false;
         recognition.interimResults = false;
 
-        recognition.onstart = () => {
-            setIsListening(true);
-        };
+        recognition.onstart = () => setIsListening(true);
 
         recognition.onresult = (event: SpeechRecognitionEvent) => {
             retriesRef.current = 0;
             const transcript = event.results[0]?.[0]?.transcript?.trim();
-            if (transcript) {
-                onResult(transcript);
-            }
+            if (transcript) onResult(transcript);
         };
 
         recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-            // "aborted" happens when we manually stop — don't surface it
             if (event.error === "aborted") return;
 
-            // Brave blocks Web Speech API connections to Google's servers.
-            // Retrying won't help — show a specific message immediately.
-            if (event.error === "network" && isBraveBrowser()) {
-                setIsListening(false);
-                onError?.("Brave blocks speech recognition for privacy. Please use Chrome or Edge for voice input.");
-                return;
-            }
-
-            // Network errors on other browsers: silently retry up to MAX_RETRIES times.
-            // Chrome on HTTPS can briefly fail connecting to Google's speech servers.
             if (event.error === "network" && retriesRef.current < MAX_RETRIES) {
                 retriesRef.current++;
-                setTimeout(() => startListening(true), RETRY_DELAY_MS);
+                setTimeout(() => startWebSpeechListening(true), RETRY_DELAY_MS);
                 return;
             }
 
@@ -138,12 +197,10 @@ export function useSpeechRecognition({
                 "no-speech": "No speech detected. Please try again.",
                 network: "Speech recognition is unavailable. Please try Chrome or Edge.",
             };
-            const msg = messages[event.error] ?? `Speech recognition error: ${event.error}`;
-            onError?.(msg);
+            onError?.(messages[event.error] ?? `Speech recognition error: ${event.error}`);
         };
 
         recognition.onend = () => {
-            // Don't reset listening state if we're about to retry
             if (retriesRef.current > 0 && retriesRef.current <= MAX_RETRIES) return;
             setIsListening(false);
             recognitionRef.current = null;
@@ -153,8 +210,8 @@ export function useSpeechRecognition({
         recognition.start();
     }, [lang, onResult, onError]);
 
-    const stopListening = useCallback(() => {
-        retriesRef.current = MAX_RETRIES + 1; // prevent retries after manual stop
+    const stopWebSpeechListening = useCallback(() => {
+        retriesRef.current = MAX_RETRIES + 1;
         if (recognitionRef.current) {
             recognitionRef.current.stop();
             recognitionRef.current = null;
@@ -162,13 +219,15 @@ export function useSpeechRecognition({
         setIsListening(false);
     }, []);
 
+    // ── Unified toggle ───────────────────────────────────────
+
     const toggleListening = useCallback(() => {
         if (isListening) {
-            stopListening();
+            brave ? stopBraveListening() : stopWebSpeechListening();
         } else {
-            startListening();
+            brave ? startBraveListening() : startWebSpeechListening();
         }
-    }, [isListening, startListening, stopListening]);
+    }, [isListening, brave, startBraveListening, stopBraveListening, startWebSpeechListening, stopWebSpeechListening]);
 
     return { isSupported, isListening, toggleListening };
 }

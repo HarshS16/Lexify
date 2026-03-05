@@ -61,6 +61,9 @@ export function useSpeechRecognition({
     const isSupported = !!getSpeechRecognition();
     const [isListening, setIsListening] = useState(false);
     const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+    const retriesRef = useRef(0);
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 300;
 
     // Clean up on unmount
     useEffect(() => {
@@ -72,13 +75,18 @@ export function useSpeechRecognition({
         };
     }, []);
 
-    const startListening = useCallback(() => {
+    const startListening = useCallback((isRetry = false) => {
         const SpeechRecognition = getSpeechRecognition();
         if (!SpeechRecognition) return;
 
         // Stop any existing session
         if (recognitionRef.current) {
             recognitionRef.current.abort();
+        }
+
+        // Reset retry counter on fresh start (not a retry)
+        if (!isRetry) {
+            retriesRef.current = 0;
         }
 
         const recognition = new SpeechRecognition();
@@ -91,6 +99,7 @@ export function useSpeechRecognition({
         };
 
         recognition.onresult = (event: SpeechRecognitionEvent) => {
+            retriesRef.current = 0;
             const transcript = event.results[0]?.[0]?.transcript?.trim();
             if (transcript) {
                 onResult(transcript);
@@ -98,20 +107,31 @@ export function useSpeechRecognition({
         };
 
         recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
-            setIsListening(false);
             // "aborted" happens when we manually stop — don't surface it
-            if (event.error !== "aborted") {
-                const messages: Record<string, string> = {
-                    "not-allowed": "Microphone access was denied. Please allow it in your browser settings.",
-                    "no-speech": "No speech detected. Please try again.",
-                    network: "Network error. Check your connection and try again.",
-                };
-                const msg = messages[event.error] ?? `Speech recognition error: ${event.error}`;
-                onError?.(msg);
+            if (event.error === "aborted") return;
+
+            // Network errors: silently retry up to MAX_RETRIES times
+            // This is a known issue with Chrome's SpeechRecognition on deployed
+            // HTTPS sites — the initial connection to Google's servers can fail.
+            if (event.error === "network" && retriesRef.current < MAX_RETRIES) {
+                retriesRef.current++;
+                setTimeout(() => startListening(true), RETRY_DELAY_MS);
+                return;
             }
+
+            setIsListening(false);
+            const messages: Record<string, string> = {
+                "not-allowed": "Microphone access was denied. Please allow it in your browser settings.",
+                "no-speech": "No speech detected. Please try again.",
+                network: "Speech recognition is unavailable. This may be a browser limitation — try Chrome or Edge.",
+            };
+            const msg = messages[event.error] ?? `Speech recognition error: ${event.error}`;
+            onError?.(msg);
         };
 
         recognition.onend = () => {
+            // Don't reset listening state if we're about to retry
+            if (retriesRef.current > 0 && retriesRef.current <= MAX_RETRIES) return;
             setIsListening(false);
             recognitionRef.current = null;
         };
@@ -121,6 +141,7 @@ export function useSpeechRecognition({
     }, [lang, onResult, onError]);
 
     const stopListening = useCallback(() => {
+        retriesRef.current = MAX_RETRIES + 1; // prevent retries after manual stop
         if (recognitionRef.current) {
             recognitionRef.current.stop();
             recognitionRef.current = null;

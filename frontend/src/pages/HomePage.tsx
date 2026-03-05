@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Search, RefreshCw } from "lucide-react";
+import { useState, useCallback } from "react";
+import { Search, RefreshCw, Mic, MicOff } from "lucide-react";
 import { api } from "../services/api";
 import { addToHistory } from "../services/history";
 import type {
@@ -15,6 +15,7 @@ import RewriteResultComp from "../components/RewriteResult";
 import LoadingOverlay from "../components/LoadingOverlay";
 import SaveWordModal from "../components/SaveWordModal";
 import { useToast, ToastContainer } from "../components/Toast";
+import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
 
 const toneOptions: ToneOption[] = [
     "neutral",
@@ -51,6 +52,20 @@ export default function HomePage() {
     const [rewriteResult, setRewriteResult] = useState<RewriteResultType | null>(null);
     const [saveModal, setSaveModal] = useState<string | null>(null);
     const { toasts, addToast, removeToast } = useToast();
+
+    const onSpeechResult = useCallback((text: string) => {
+        setInput(text);
+        addToast(`🎤 "${text}"`, "success");
+    }, [addToast]);
+
+    const onSpeechError = useCallback((error: string) => {
+        addToast(error, "error");
+    }, [addToast]);
+
+    const { isSupported: micSupported, isListening, toggleListening } = useSpeechRecognition({
+        onResult: onSpeechResult,
+        onError: onSpeechError,
+    });
 
     const handleSearch = async () => {
         if (!input.trim()) return;
@@ -155,9 +170,9 @@ export default function HomePage() {
 
                 {/* Search Box */}
                 <div className="search-container">
-                    <div className="search-box">
+                    <div className={`search-box${isListening ? " is-listening" : ""}`}>
                         <input
-                            className="search-input"
+                            className={`search-input${micSupported ? " has-mic" : ""}${isListening ? " listening-active" : ""}`}
                             type="text"
                             placeholder={
                                 mode === "search"
@@ -169,6 +184,30 @@ export default function HomePage() {
                             onKeyDown={handleKeyDown}
                             id="search-input"
                         />
+                        {/* Audio Waveform Visualizer */}
+                        {isListening && (
+                            <div className="voice-visualizer" id="voice-visualizer">
+                                <div className="voice-wave-bars">
+                                    <span className="wave-bar" style={{ animationDelay: "0s" }} />
+                                    <span className="wave-bar" style={{ animationDelay: "0.15s" }} />
+                                    <span className="wave-bar" style={{ animationDelay: "0.3s" }} />
+                                    <span className="wave-bar" style={{ animationDelay: "0.1s" }} />
+                                    <span className="wave-bar" style={{ animationDelay: "0.25s" }} />
+                                </div>
+                                <span className="voice-label">Listening...</span>
+                            </div>
+                        )}
+                        {micSupported && (
+                            <button
+                                className={`mic-btn${isListening ? " listening" : ""}`}
+                                onClick={toggleListening}
+                                type="button"
+                                title={isListening ? "Stop listening" : "Speak your word or sentence"}
+                                id="mic-btn"
+                            >
+                                {isListening ? <MicOff size={18} /> : <Mic size={18} />}
+                            </button>
+                        )}
                         <button
                             className="search-btn"
                             onClick={handleSearch}

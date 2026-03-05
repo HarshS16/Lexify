@@ -76,7 +76,8 @@ class AIService:
         self._cache = TTLCache(ttl_seconds=3600)
 
     def _parse_json_response(self, text: str) -> dict:
-        """Extract JSON from LLM response, handling markdown blocks and trailing text."""
+        """Extract JSON from LLM response, handling markdown blocks, trailing text,
+        and truncated / malformed output from the model."""
         if not text:
             raise ValueError("AI returned an empty response")
 
@@ -89,47 +90,81 @@ class AIService:
                 inner = parts[i].strip()
                 if inner.lower().startswith("json"):
                     inner = inner[4:].strip()
-                try:
-                    return json.loads(inner)
-                except json.JSONDecodeError as e:
-                    if "extra data" in str(e).lower():
-                        try:
-                            return json.loads(inner[:inner.rfind("}") + 1])
-                        except:
-                            continue
-                    continue
+                result = self._try_parse(inner)
+                if result is not None:
+                    return result
 
         # 2. Direct parse
+        result = self._try_parse(cleaned)
+        if result is not None:
+            return result
+
+        # 3. Extract first JSON object between { ... }
+        start = cleaned.find("{")
+        end = cleaned.rfind("}") + 1
+        if start != -1 and end > start:
+            result = self._try_parse(cleaned[start:end])
+            if result is not None:
+                return result
+
+        # 4. Try array
+        start = cleaned.find("[")
+        end = cleaned.rfind("]") + 1
+        if start != -1 and end > start:
+            result = self._try_parse(cleaned[start:end])
+            if result is not None:
+                return result
+
+        logger.error(f"JSON parse failed. Raw response: {text[:500]}")
+        raise ValueError(f"Could not parse AI response as JSON: {text[:200]}")
+
+    @staticmethod
+    def _try_parse(text: str) -> dict | None:
+        """Try multiple strategies to get valid JSON from potentially malformed text."""
+        # Strategy 1: Direct parse
         try:
-            return json.loads(cleaned)
-        except json.JSONDecodeError as e:
-            # 3. Handle trailing text
-            if "extra data" in str(e).lower():
-                try:
-                    return json.loads(cleaned[:cleaned.rfind("}") + 1])
-                except:
-                    pass
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
 
-            # 4. Extract first JSON object
-            start = cleaned.find("{")
-            end = cleaned.rfind("}") + 1
-            if start != -1 and end > start:
-                try:
-                    return json.loads(cleaned[start:end])
-                except json.JSONDecodeError:
-                    pass
+        # Strategy 2: raw_decode — extracts just the first complete JSON value,
+        # ignoring any trailing text that causes "Extra data" errors
+        try:
+            decoder = json.JSONDecoder()
+            # Find the first { or [ to start decoding from
+            for i, ch in enumerate(text):
+                if ch in "{[":
+                    obj, _ = decoder.raw_decode(text, i)
+                    if isinstance(obj, (dict, list)):
+                        return obj
+        except json.JSONDecodeError:
+            pass
 
-            # 5. Try array
-            start = cleaned.find("[")
-            end = cleaned.rfind("]") + 1
-            if start != -1 and end > start:
-                try:
-                    return json.loads(cleaned[start:end])
-                except json.JSONDecodeError:
-                    pass
+        # Strategy 3: Repair truncated JSON (model cut off mid-string)
+        # Close any unterminated strings and braces/brackets
+        repaired = text.rstrip()
+        # If ending mid-string, close the string
+        quote_count = repaired.count('"') - repaired.count('\\"')
+        if quote_count % 2 == 1:
+            repaired += '"'
 
-            logger.error(f"JSON parse failed. Raw response: {text[:500]}")
-            raise
+        # Count open braces/brackets and close them
+        open_braces = repaired.count("{") - repaired.count("}")
+        open_brackets = repaired.count("[") - repaired.count("]")
+        repaired += "]" * max(0, open_brackets)
+        repaired += "}" * max(0, open_braces)
+
+        try:
+            decoder = json.JSONDecoder()
+            for i, ch in enumerate(repaired):
+                if ch in "{[":
+                    obj, _ = decoder.raw_decode(repaired, i)
+                    if isinstance(obj, (dict, list)):
+                        return obj
+        except json.JSONDecodeError:
+            pass
+
+        return None
 
     async def _call_model(self, model: str, prompt: str) -> str:
         """Call a single model via OpenRouter using the persistent client."""

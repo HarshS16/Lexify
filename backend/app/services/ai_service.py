@@ -279,20 +279,31 @@ Return ONLY this JSON:
 
         # Normalize alternatives
         raw_alts = data.get("alternatives", [])
+        best_fit_word = data.get("best_fit", "").lower().strip()
+        seen_words: set[str] = set()
+        if best_fit_word:
+            seen_words.add(best_fit_word)
+
         alternatives = []
         for alt in raw_alts:
             if isinstance(alt, str):
-                alternatives.append(WordAlternative(
-                    word=alt, strength="medium", categories=[], explanation=""
-                ))
+                key = alt.lower().strip()
+                if key and key not in seen_words:
+                    seen_words.add(key)
+                    alternatives.append(WordAlternative(
+                        word=alt, strength="medium", categories=[], explanation=""
+                    ))
             elif isinstance(alt, dict):
-                alternatives.append(WordAlternative(
-                    word=alt.get("word", ""),
-                    strength=alt.get("strength", "medium"),
-                    categories=alt.get("categories", []),
-                    explanation=alt.get("explanation", ""),
-                    example_sentence=alt.get("example_sentence", ""),
-                ))
+                key = alt.get("word", "").lower().strip()
+                if key and key not in seen_words:
+                    seen_words.add(key)
+                    alternatives.append(WordAlternative(
+                        word=alt.get("word", ""),
+                        strength=alt.get("strength", "medium"),
+                        categories=alt.get("categories", []),
+                        explanation=alt.get("explanation", ""),
+                        example_sentence=alt.get("example_sentence", ""),
+                    ))
 
         result = WordSuggestionResult(
             best_fit=data.get("best_fit", ""),

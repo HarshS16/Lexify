@@ -18,14 +18,15 @@ from app.models.schemas import (
     HistoryResponse,
     WordOfTheDayResponse,
 )
-from app.services.ai_service import get_ai_service
-from app.core.content_filter import is_safe, BLOCKED_RESPONSE
-from app.core.config import get_settings
-import httpx
+from app.services.ai_service import get_ai_service, get_suggestions, get_word_of_the_day
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+@router.get("/health")
+def health_check():
+    """Simple health check endpoint."""
+    return {"status": "ok"}
 
 # ── Word Search ────────────────────────────────────────────
 
